@@ -1,54 +1,142 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
+import requests
+import os
+from dotenv import load_dotenv
 
-# Configuração da página
+load_dotenv()
+
+OMDB_API_KEY = os.getenv("OMDB_API_KEY")
+
+# ==============================
+# CONFIG
+# ==============================
+
 st.set_page_config(page_title="IMDB Recommender", layout="wide")
+st.title("🎬 IMDB Movie Recommender - Hybrid Version")
 
-st.title("🎬 IMDB Top 100 - Recomendador Inteligente")
+# ==============================
+# DATABASE CONNECTION
+# ==============================
 
-# Cache para não recarregar o CSV toda hora
-@st.cache_data
-def load_data():
-    df = pd.read_csv("top100_clean.csv")
-    df["genres"] = df["genres"].str.split(",")
-    df = df.explode("genres")
-    df["genres"] = df["genres"].str.strip()
-    return df
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect("movies.db", check_same_thread=False)
 
-df = load_data()
+conn = get_connection()
 
-# Sidebar
-st.sidebar.header("Filtros")
+# ==============================
+# OMDB FETCH FUNCTION
+# ==============================
 
-genres = sorted(df["genres"].unique())
-selected_genre = st.sidebar.selectbox("Escolha um gênero", genres)
+def fetch_movie_from_api(title):
+    url = f"http://www.omdbapi.com/?t={title}&apikey={OMDB_API_KEY}"
+    response = requests.get(url)
+    data = response.json()
 
-min_rating = st.sidebar.slider(
-    "Nota mínima",
-    min_value=float(df["averageRating"].min()),
-    max_value=float(df["averageRating"].max()),
-    value=8.0
-)
+    if data.get("Response") == "True":
+        return {
+            "Title": data.get("Title"),
+            "Year": data.get("Year"),
+            "Genre": data.get("Genre"),
+            "Rating": data.get("imdbRating"),
+            "Votes": data.get("imdbVotes"),
+            "Plot": data.get("Plot")
+        }
+    return None
 
-# Filtro principal
-filtered = df[
-    (df["genres"] == selected_genre) &
-    (df["averageRating"] >= min_rating)
-]
+# ==============================
+# SIDEBAR FILTERS
+# ==============================
 
-st.subheader(f"🎥 Filmes de {selected_genre} com nota acima de {min_rating}")
+st.sidebar.header("Filters")
 
-if filtered.empty:
-    st.warning("Nenhum filme encontrado com esses critérios.")
+genres_query = "SELECT DISTINCT genre FROM movies ORDER BY genre"
+genres = pd.read_sql(genres_query, conn)["genre"].tolist()
+
+search_title = st.sidebar.text_input("Search movie title")
+selected_genre = st.sidebar.selectbox("Select genre", ["All"] + genres)
+min_rating = st.sidebar.slider("Minimum rating", 0.0, 10.0, 8.0)
+
+# ==============================
+# LOCAL DATABASE QUERY
+# ==============================
+
+query = "SELECT title, year, rating, votes FROM movies WHERE rating >= ?"
+params = [min_rating]
+
+if selected_genre != "All":
+    query += " AND genre = ?"
+    params.append(selected_genre)
+
+if search_title:
+    query += " AND title LIKE ?"
+    params.append(f"%{search_title}%")
+
+query += " ORDER BY rating DESC"
+
+df = pd.read_sql(query, conn, params=params)
+
+# ==============================
+# RESULTS SECTION
+# ==============================
+
+st.subheader("🎥 Results")
+
+if df.empty and search_title:
+    st.info("Movie not found in local database. Searching online... 🌐")
+
+    api_movie = fetch_movie_from_api(search_title)
+
+    if api_movie:
+        st.subheader("🌍 Online Result")
+        st.write(f"**Title:** {api_movie['Title']}")
+        st.write(f"**Year:** {api_movie['Year']}")
+        st.write(f"**Genre:** {api_movie['Genre']}")
+        st.write(f"**IMDB Rating:** {api_movie['Rating']}")
+        st.write(f"**Votes:** {api_movie['Votes']}")
+        st.write(f"**Plot:** {api_movie['Plot']}")
+    else:
+        st.error("Movie not found online either.")
 else:
-    top_movies = filtered.sort_values(
-        by="averageRating", ascending=False
-    ).head(10)
+    st.dataframe(df, use_container_width=True)
 
-    st.dataframe(
-        top_movies[["primaryTitle", "startYear", "averageRating"]],
-        use_container_width=True
-    )
+# ==============================
+# DASHBOARD SECTION
+# ==============================
 
 st.markdown("---")
-st.caption("Projeto IMDB Recommender 🚀")
+st.subheader("📊 Movies Distribution by Genre")
+
+genre_count_query = """
+SELECT genre, COUNT(*) as total_movies
+FROM movies
+GROUP BY genre
+ORDER BY total_movies DESC
+"""
+
+genre_df = pd.read_sql(genre_count_query, conn)
+
+st.bar_chart(genre_df.set_index("genre"))
+
+# ==============================
+# TOP 5 SECTION
+# ==============================
+
+st.markdown("---")
+st.subheader("🏆 Top 5 Movies (Highest Rated)")
+
+top5_query = """
+SELECT title, year, rating, votes
+FROM movies
+ORDER BY rating DESC, votes DESC
+LIMIT 5
+"""
+
+top5_df = pd.read_sql(top5_query, conn)
+
+st.dataframe(top5_df, use_container_width=True)
+
+st.markdown("---")
+st.caption("IMDB Recommender - Hybrid SQLite + OMDb API 🚀")
