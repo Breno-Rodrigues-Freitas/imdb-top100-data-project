@@ -63,18 +63,35 @@ min_rating = st.sidebar.slider("Minimum rating", 0.0, 10.0, 8.0)
 # LOCAL DATABASE QUERY
 # ==============================
 
-query = "SELECT title, year, rating, votes FROM movies WHERE rating >= ?"
+query = """
+SELECT 
+    m.title,
+    m.year,
+    m.rating,
+    m.votes,
+    GROUP_CONCAT(g.name, ', ') as genres
+FROM movies m
+JOIN movie_genres mg ON m.id = mg.movie_id
+JOIN genres g ON g.id = mg.genre_id
+WHERE m.rating >= ?
+"""
+
 params = [min_rating]
 
+# Filtro por gênero
 if selected_genre != "All":
-    query += " AND genre = ?"
+    query += " AND m.id IN (SELECT movie_id FROM movie_genres mg JOIN genres g ON g.id = mg.genre_id WHERE g.name = ?)"
     params.append(selected_genre)
 
+# Filtro por título
 if search_title:
-    query += " AND title LIKE ?"
+    query += " AND m.title LIKE ?"
     params.append(f"%{search_title}%")
 
-query += " ORDER BY rating DESC"
+query += """
+GROUP BY m.id
+ORDER BY m.rating DESC
+"""
 
 df = pd.read_sql(query, conn, params=params)
 
@@ -97,10 +114,52 @@ if df.empty and search_title:
         st.write(f"**IMDB Rating:** {api_movie['Rating']}")
         st.write(f"**Votes:** {api_movie['Votes']}")
         st.write(f"**Plot:** {api_movie['Plot']}")
+
+        if st.button("➕ Add to Local Database"):
+
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT id FROM movies WHERE title = ?", (api_movie["Title"],))
+            existing = cursor.fetchone()
+
+            if existing:
+                st.warning("Movie already exists in database.")
+            else:
+                year = int(api_movie["Year"]) if str(api_movie["Year"]).isdigit() else None
+                rating = float(api_movie["Rating"]) if api_movie["Rating"] != "N/A" else 0
+                votes = int(api_movie["Votes"].replace(",", "")) if api_movie["Votes"] != "N/A" else 0
+
+                cursor.execute(
+                    "INSERT INTO movies (title, year, rating, votes) VALUES (?, ?, ?, ?)",
+                    (api_movie["Title"], year, rating, votes)
+                )
+
+                movie_id = cursor.lastrowid
+
+                genres_list = [g.strip() for g in api_movie["Genre"].split(",")]
+
+                for genre in genres_list:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO genres (name) VALUES (?)",
+                        (genre,)
+                    )
+
+                    cursor.execute(
+                        "SELECT id FROM genres WHERE name = ?",
+                        (genre,)
+                    )
+                    genre_id = cursor.fetchone()[0]
+
+                    cursor.execute(
+                        "INSERT INTO movie_genres (movie_id, genre_id) VALUES (?, ?)",
+                        (movie_id, genre_id)
+                    )
+
+                conn.commit()
+                st.success("Movie successfully added to local database! 🚀")
+
     else:
         st.error("Movie not found online either.")
-else:
-    st.dataframe(df, use_container_width=True)
 
 # ==============================
 # DASHBOARD SECTION
