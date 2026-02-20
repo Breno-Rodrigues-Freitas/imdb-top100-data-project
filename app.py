@@ -162,24 +162,6 @@ if df.empty and search_title:
         st.error("Movie not found online either.")
 
 # ==============================
-# DASHBOARD SECTION
-# ==============================
-
-st.markdown("---")
-st.subheader("📊 Movies Distribution by Genre")
-
-genre_count_query = """
-SELECT genre, COUNT(*) as total_movies
-FROM movies
-GROUP BY genre
-ORDER BY total_movies DESC
-"""
-
-genre_df = pd.read_sql(genre_count_query, conn)
-
-st.bar_chart(genre_df.set_index("genre"))
-
-# ==============================
 # TOP 5 SECTION
 # ==============================
 
@@ -199,3 +181,55 @@ st.dataframe(top5_df, use_container_width=True)
 
 st.markdown("---")
 st.caption("IMDB Recommender - Hybrid SQLite + OMDb API 🚀")
+
+# ==============================
+# 🎯 SIMILARITY SECTION
+# ==============================
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+st.markdown("---")
+st.subheader("🎯 Find Similar Movies")
+
+# Buscar todos os filmes com gêneros
+similarity_query = """
+SELECT 
+    m.id,
+    m.title,
+    GROUP_CONCAT(g.name, ' ') as genres
+FROM movies m
+JOIN movie_genres mg ON m.id = mg.movie_id
+JOIN genres g ON g.id = mg.genre_id
+GROUP BY m.id
+"""
+
+movies_df = pd.read_sql(similarity_query, conn)
+
+if not movies_df.empty:
+
+    # Criar coluna texto
+    movies_df["content"] = movies_df["genres"]
+
+    # Criar matriz TF-IDF
+    vectorizer = TfidfVectorizer(stop_words="english")
+    tfidf_matrix = vectorizer.fit_transform(movies_df["content"])
+
+    # Similaridade
+    cosine_sim = cosine_similarity(tfidf_matrix)
+
+    # Selecionar filme
+    selected_movie = st.selectbox("Choose a movie", movies_df["title"])
+
+    if selected_movie:
+        idx = movies_df[movies_df["title"] == selected_movie].index[0]
+
+        sim_scores = list(enumerate(cosine_sim[idx]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+
+        sim_scores = sim_scores[1:6]  # top 5 similares
+
+        similar_indices = [i[0] for i in sim_scores]
+
+        st.write("### 🔥 Similar Movies:")
+        st.write(movies_df["title"].iloc[similar_indices].values)
