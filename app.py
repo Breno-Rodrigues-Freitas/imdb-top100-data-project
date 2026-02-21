@@ -233,3 +233,46 @@ if not movies_df.empty:
 
         st.write("### 🔥 Similar Movies:")
         st.write(movies_df["title"].iloc[similar_indices].values)
+
+# ==============================
+# 🤖 MOVIE CHATBOT
+# ==============================
+
+st.markdown("---")
+st.subheader("🤖 Movie Assistant")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+user_input = st.chat_input("Ask for movie recommendations...")
+
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    with st.chat_message("user"):
+        st.write(user_input)
+
+    # Simples lógica baseada em palavras-chave
+    response = ""
+
+    if "action" in user_input.lower():
+        response = "Here are some action movies:"
+        action_query = """
+        SELECT title FROM movies
+        WHERE rating >= 7
+        LIMIT 5
+        """
+        action_df = pd.read_sql(action_query, conn)
+        response += "\n" + "\n".join(action_df["title"].tolist())
+
+    else:
+        response = "Tell me a genre like action, drama, comedy..."
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
+
+    with st.chat_message("assistant"):
+        st.write(response)
