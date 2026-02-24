@@ -204,7 +204,14 @@ if df.empty and search_title:
         st.write(f"**Votes:** {api_movie['Votes']}")
         st.write(f"**Plot:** {api_movie['Plot']}")
 
-        if st.button("➕ Add to Local Database"):
+    st.subheader("🎬 Trailer")
+
+    trailer_query = api_movie["Title"] + " official trailer"
+    youtube_search_url = f"https://www.youtube.com/results?search_query={trailer_query.replace(' ', '+')}"
+
+    st.markdown(f"[▶ Watch Trailer on YouTube]({youtube_search_url})")
+
+    if st.button("➕ Add to Local Database"):
 
             cursor = conn.cursor()
 
