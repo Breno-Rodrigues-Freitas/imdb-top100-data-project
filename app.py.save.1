@@ -227,14 +227,15 @@ if df.empty and search_title:
         st.write(f"**Votes:** {api_movie['Votes']}")
         st.write(f"**Plot:** {api_movie['Plot']}")
 
-        st.subheader("🎬 Trailer")
+    st.subheader("🎬 Trailer")
 
-        video_id = fetch_trailer(api_movie["Title"])
 
-        if video_id:
-            st.video(f"https://www.youtube.com/watch?v={video_id}")
-        else:
-            st.warning("Trailer not found.")
+   video_id = fetch_trailer(api_movie["Title"])
+
+	if video_id:
+    		st.video(f"https://www.youtube.com/watch?v={video_id}")
+	else:
+    		st.warning("Trailer not found.")
 
     if st.button("➕ Add to Local Database"):
 
