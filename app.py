@@ -14,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 load_dotenv()
 OMDB_API_KEY = os.getenv("OMDB_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 # ==============================
 # CONFIG
@@ -129,6 +130,10 @@ def fetch_movie_from_api(title):
 
     return None
 
+# ==============================
+# YOUTUBE TRAILER FUNCTION
+# ==============================
+
 def fetch_trailer(title):
     if not YOUTUBE_API_KEY:
         return None
@@ -150,6 +155,85 @@ def fetch_trailer(title):
         return data["items"][0]["id"]["videoId"]
 
     return None
+
+# ==============================
+# HUGGING FACE AI FUNCTIONS
+# ==============================
+
+def get_movie_context():
+    """Get movie data from database for AI context"""
+    try:
+        query = """
+        SELECT title, rating, year 
+        FROM movies 
+        WHERE rating IS NOT NULL 
+        ORDER BY rating DESC 
+        LIMIT 20
+        """
+        df = pd.read_sql(query, conn)
+        if not df.empty:
+            return df.to_string(index=False)
+        return "No movies in database yet."
+    except:
+        return "Database not available."
+
+def get_ai_response(user_message):
+    """Get response from Hugging Face AI model"""
+    
+    if not HUGGINGFACE_API_KEY:
+        return "AI service not configured. Please check your HUGGINGFACE_API_KEY."
+    
+    try:
+        # API endpoint
+        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+        
+        # Get movie context
+        movie_context = get_movie_context()
+        
+        # Prepare prompt
+        prompt = f"""<s>[INST] You are a movie assistant. Here are some movies in the database:
+{movie_context}
+
+Answer questions about movies. Keep answers short and helpful.
+
+User: {user_message} [/INST]"""
+        
+        # Make request
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 150,
+                "temperature": 0.7,
+                "do_sample": True
+            }
+        }
+        
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Extract text from response
+            if isinstance(result, list):
+                if len(result) > 0:
+                    if isinstance(result[0], dict) and 'generated_text' in result[0]:
+                        return result[0]['generated_text'].split('[/INST]')[-1].strip()
+                    return str(result[0])
+            elif isinstance(result, dict) and 'generated_text' in result:
+                return result['generated_text'].split('[/INST]')[-1].strip()
+            
+            return "I received a response but couldn't understand it."
+            
+        elif response.status_code == 503:
+            return "The AI model is loading. Please try again in 10 seconds."
+        else:
+            return f"Error {response.status_code}. Please try again."
+            
+    except requests.exceptions.Timeout:
+        return "Request timed out. Please try again."
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # ==============================
 # SIDEBAR FILTERS
@@ -364,17 +448,16 @@ if not movies_df.empty:
         st.write(movies_df["title"].iloc[similar_indices].values)
 
 # ==============================
-# ENHANCED CHATBOT - SOMENTE ISSO FOI MELHORADO
+# AI-POWERED CHATBOT
 # ==============================
 
 st.markdown("---")
-st.subheader("🤖 Movie Assistant")
+st.subheader("🤖 AI Movie Assistant (Powered by Hugging Face)")
 
 # Initialize chat session
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = [
-        {"role": "assistant", "content": "👋 Hi! I can help you find movies. Try asking:"},
-        {"role": "assistant", "content": "• 'Show action movies'\n• 'Top 5 movies'\n• 'Movies like Inception'\n• 'Recommend something'"}
+        {"role": "assistant", "content": "👋 Hi! I'm your AI movie assistant. Ask me anything about movies!"}
     ]
 
 # Display chat messages
@@ -390,140 +473,10 @@ if user_input := st.chat_input("Ask about movies..."):
     with st.chat_message("user"):
         st.write(user_input)
 
-    # Process user input
-    response = ""
-    user_input_lower = user_input.lower()
-
-    # Check for genre
-    genres_list = ['action', 'comedy', 'drama', 'horror', 'romance', 'sci-fi', 'thriller']
-    found_genre = None
-    for genre in genres_list:
-        if genre in user_input_lower:
-            found_genre = genre
-            break
-
-    if found_genre:
-        # Query movies by genre
-        genre_query = """
-        SELECT m.title, m.rating, m.year
-        FROM movies m
-        JOIN movie_genres mg ON m.id = mg.movie_id
-        JOIN genres g ON g.id = mg.genre_id
-        WHERE LOWER(g.name) LIKE ? AND m.rating >= 6.0
-        ORDER BY m.rating DESC
-        LIMIT 5
-        """
-        genre_df = pd.read_sql(genre_query, conn, params=[f"%{found_genre}%"])
-        
-        if not genre_df.empty:
-            response = f"🎬 **Top {found_genre} movies:**\n\n"
-            for i, row in genre_df.iterrows():
-                response += f"{i+1}. **{row['title']}** ({row['year']}) - ⭐ {row['rating']:.1f}\n"
-        else:
-            response = f"Sorry, no {found_genre} movies found in database."
-
-    elif "top" in user_input_lower or "best" in user_input_lower:
-        # Extract number if present
-        import re
-        numbers = re.findall(r'\d+', user_input)
-        limit = int(numbers[0]) if numbers else 5
-        
-        top_query = """
-        SELECT title, rating, year
-        FROM movies
-        WHERE rating IS NOT NULL
-        ORDER BY rating DESC
-        LIMIT ?
-        """
-        top_df = pd.read_sql(top_query, conn, params=[limit])
-        
-        if not top_df.empty:
-            response = f"🏆 **Top {limit} Movies:**\n\n"
-            for i, row in top_df.iterrows():
-                response += f"{i+1}. **{row['title']}** ({row['year']}) - ⭐ {row['rating']:.1f}\n"
-        else:
-            response = "No movies found in database."
-
-    elif "like" in user_input_lower or "similar" in user_input_lower:
-        # Extract movie title
-        words = user_input.split()
-        if "like" in words:
-            idx = words.index("like")
-            if idx + 1 < len(words):
-                movie_title = " ".join(words[idx+1:]).strip('?.,!').title()
-                
-                # Get similar movies (using existing similarity logic)
-                if not movies_df.empty:
-                    if movie_title in movies_df["title"].values:
-                        idx = movies_df[movies_df["title"] == movie_title].index[0]
-                        sim_scores = list(enumerate(cosine_sim[idx]))
-                        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:4]
-                        similar = movies_df["title"].iloc[[i[0] for i in sim_scores]].tolist()
-                        
-                        response = f"🎯 **Movies like '{movie_title}':**\n\n"
-                        for i, movie in enumerate(similar, 1):
-                            response += f"{i}. {movie}\n"
-                    else:
-                        response = f"Movie '{movie_title}' not found in database."
-                else:
-                    response = "No movies in database for comparison."
-
-    elif "recommend" in user_input_lower or "suggest" in user_input_lower:
-        # Random recommendations
-        rec_query = """
-        SELECT title, rating, year
-        FROM movies
-        WHERE rating >= 7.0
-        ORDER BY RANDOM()
-        LIMIT 5
-        """
-        rec_df = pd.read_sql(rec_query, conn)
-        
-        if not rec_df.empty:
-            response = "🎲 **Random Recommendations:**\n\n"
-            for i, row in rec_df.iterrows():
-                response += f"{i+1}. **{row['title']}** ({row['year']}) - ⭐ {row['rating']:.1f}\n"
-        else:
-            response = "No movies available for recommendations."
-
-    elif "trailer" in user_input_lower:
-        # Extract movie title for trailer
-        words = user_input.split()
-        if "for" in words:
-            idx = words.index("for")
-            if idx + 1 < len(words):
-                movie_title = " ".join(words[idx+1:]).strip('?.,!')
-                video_id = fetch_trailer(movie_title)
-                if video_id:
-                    response = f"TRAILER:{movie_title}:{video_id}"
-                else:
-                    response = f"Sorry, couldn't find trailer for '{movie_title}'."
-        else:
-            response = "Which movie? Try: 'trailer for Inception'"
-
-    elif "help" in user_input_lower:
-        response = """**Available commands:**
-• 'Show action movies' - movies by genre
-• 'Top 10 movies' - best rated
-• 'Movies like Inception' - similar movies
-• 'Recommend something' - random picks
-• 'Trailer for Inception' - watch trailer"""
-
-    else:
-        response = "I didn't understand. Try 'help' to see available commands."
-
-    # Add assistant response
-    st.session_state.chat_messages.append({"role": "assistant", "content": response})
-    
-    # Display response
+    # Get AI response
     with st.chat_message("assistant"):
-        if response.startswith("TRAILER:"):
-            parts = response.split(":")
-            if len(parts) == 3:
-                _, movie_title, video_id = parts
-                st.write(f"🎬 **Trailer for {movie_title}:**")
-                st.video(f"https://www.youtube.com/watch?v={video_id}")
-            else:
-                st.write(response)
-        else:
+        with st.spinner("Thinking..."):
+            response = get_ai_response(user_input)
             st.write(response)
+    
+    st.session_state.chat_messages.append({"role": "assistant", "content": response})
