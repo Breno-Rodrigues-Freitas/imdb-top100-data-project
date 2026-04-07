@@ -7,12 +7,20 @@ import hashlib
 import hmac
 import re
 import base64
+import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from PIL import Image
-import io
+
+# ==============================
+# LOGGING CONFIG
+# ==============================
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # ==============================
 # LOAD ENV
@@ -33,7 +41,10 @@ st.title("🎬 IMDB Movie Recommender - Hybrid Version")
 # ==============================
 @st.cache_resource
 def get_connection():
-    return sqlite3.connect("movies.db", check_same_thread=False)
+    conn = sqlite3.connect("movies.db", check_same_thread=False)
+    # Enable WAL mode for better concurrency
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 conn = get_connection()
 
@@ -48,27 +59,21 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# Add profile columns (if not exist)
-try:
-    conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
-except:
-    pass
-try:
-    conn.execute("ALTER TABLE users ADD COLUMN profile_pic TEXT")
-except:
-    pass
-try:
-    conn.execute("ALTER TABLE users ADD COLUMN bio TEXT")
-except:
-    pass
-try:
-    conn.execute("ALTER TABLE users ADD COLUMN favorite_genre TEXT")
-except:
-    pass
-try:
-    conn.execute("ALTER TABLE users ADD COLUMN joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-except:
-    pass
+# Add profile columns (if not exist) — log errors instead of silencing them
+_profile_columns = {
+    "email": "TEXT",
+    "profile_pic": "TEXT",
+    "bio": "TEXT",
+    "favorite_genre": "TEXT",
+    "joined_date": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+}
+for col, col_type in _profile_columns.items():
+    try:
+        conn.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+    except sqlite3.OperationalError:
+        pass  # Column already exists — expected on every run after the first
+    except Exception as e:
+        logger.error("Error adding column '%s': %s", col, e)
 
 conn.execute("""
 CREATE TABLE IF NOT EXISTS history (
@@ -125,7 +130,11 @@ def verify_password(password: str, hashed: str) -> bool:
             100000
         )
         return hmac.compare_digest(hash_obj.hex(), hash_value)
-    except:
+    except ValueError as e:
+        logger.error("Error verifying password (invalid hash format): %s", e)
+        return False
+    except Exception as e:
+        logger.error("Unexpected error verifying password: %s", e)
         return False
 
 def validate_username(username: str) -> tuple[bool, str]:
@@ -157,31 +166,34 @@ def check_login_attempts(username: str) -> tuple[bool, str]:
         if attempts >= MAX_LOGIN_ATTEMPTS:
             return False, f"Too many failed attempts. Please try again in {LOCKOUT_TIME} minutes."
         return True, ""
-    except:
+    except Exception as e:
+        logger.error("Error checking login attempts for '%s': %s", username, e)
         return True, ""
 
 def record_login_attempt(username: str, success: bool):
     try:
-        ip_address = "unknown"
         conn.execute(
             "INSERT INTO login_attempts (username, ip_address, success) VALUES (?, ?, ?)",
-            (username, ip_address, success)
+            (username, "unknown", success)
         )
         conn.commit()
-    except:
-        pass
+    except Exception as e:
+        logger.error("Error recording login attempt for '%s': %s", username, e)
 
 # ==============================
 # PROFILE FUNCTIONS
 # ==============================
 def save_profile_picture(uploaded_file, username):
     if uploaded_file is not None:
-        os.makedirs("profile_pics", exist_ok=True)
-        file_extension = uploaded_file.name.split('.')[-1]
-        filename = f"profile_pics/{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
-        with open(filename, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        return filename
+        try:
+            os.makedirs("profile_pics", exist_ok=True)
+            file_extension = uploaded_file.name.split('.')[-1]
+            filename = f"profile_pics/{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
+            with open(filename, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            return filename
+        except Exception as e:
+            logger.error("Error saving profile picture for '%s': %s", username, e)
     return None
 
 def get_profile_pic_base64(image_path):
@@ -189,8 +201,8 @@ def get_profile_pic_base64(image_path):
         if image_path and os.path.exists(image_path):
             with open(image_path, "rb") as f:
                 return base64.b64encode(f.read()).decode()
-    except:
-        pass
+    except Exception as e:
+        logger.error("Error reading profile picture at '%s': %s", image_path, e)
     return None
 
 # ==============================
@@ -205,6 +217,27 @@ if "user_id" not in st.session_state:
     st.session_state.chat_messages = [
         {"role": "assistant", "content": "👋 Hi! I'm your AI movie assistant. Ask me anything about movies!"}
     ]
+
+# ==============================
+# REMEMBER ME — restore session from cookie-like query param
+# ==============================
+# NOTE: Streamlit doesn't support real persistent cookies. We simulate
+# "remember me" by extending the session duration check. If login_time
+# is set and the user chose remember_me, we allow up to 7 days before
+# forcing re-login; otherwise the session is valid for 1 day.
+def is_session_expired() -> bool:
+    if st.session_state.login_time is None:
+        return True
+    max_duration = timedelta(days=7) if st.session_state.remember_me else timedelta(days=1)
+    return datetime.now() - st.session_state.login_time > max_duration
+
+if st.session_state.user_id is not None and is_session_expired():
+    st.warning("Your session has expired. Please log in again.")
+    for key in ['user_id', 'username', 'login_time', 'remember_me', 'current_page', 'chat_messages']:
+        st.session_state[key] = None if key not in ('current_page', 'chat_messages', 'remember_me') else (
+            'movies' if key == 'current_page' else ([] if key == 'chat_messages' else False)
+        )
+    st.rerun()
 
 # ==============================
 # AUTH UI (if not logged in)
@@ -235,7 +268,7 @@ if st.session_state.user_id is None:
                 password = st.text_input("Password", type="password", placeholder="Enter your password")
                 col1, col2 = st.columns([1,1])
                 with col1:
-                    remember_me = st.checkbox("Remember me")
+                    remember_me = st.checkbox("Remember me (7 days)")
                 with col2:
                     st.write("")
                 submitted = st.form_submit_button("🚀 Login", use_container_width=True)
@@ -307,6 +340,7 @@ if st.session_state.user_id is None:
                                 conn.commit()
                                 st.success("✅ Account created successfully! Please login.")
                         except Exception as e:
+                            logger.error("Error creating account for '%s': %s", new_username, e)
                             st.error(f"Error creating account: {str(e)}")
         
         # ----- FORGOT PASSWORD -----
@@ -320,12 +354,9 @@ if st.session_state.user_id is None:
                     if not reset_username:
                         st.error("Please enter your username")
                     else:
-                        user = conn.execute("SELECT id FROM users WHERE username = ?", (reset_username,)).fetchone()
-                        if user:
-                            st.success("📧 Password reset instructions would be sent to your email.")
-                            st.info("(Email functionality not implemented in this demo)")
-                        else:
-                            st.success("📧 If the username exists, instructions will be sent.")
+                        # Always show same message to avoid username enumeration
+                        st.success("📧 If the username exists, instructions will be sent.")
+                        st.info("(Email functionality not implemented in this demo)")
         
         st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
@@ -334,13 +365,16 @@ if st.session_state.user_id is None:
 # SIDEBAR (USER INFO & NAVIGATION)
 # ==============================
 with st.sidebar:
-    # Fetch user data for profile pic
-    user_data = conn.execute(
-        "SELECT profile_pic FROM users WHERE id = ?",
-        (st.session_state.user_id,)
-    ).fetchone()
-    profile_pic = user_data[0] if user_data else None
-    
+    try:
+        user_data = conn.execute(
+            "SELECT profile_pic FROM users WHERE id = ?",
+            (st.session_state.user_id,)
+        ).fetchone()
+        profile_pic = user_data[0] if user_data else None
+    except Exception as e:
+        logger.error("Error fetching profile pic: %s", e)
+        profile_pic = None
+
     # Profile card
     if profile_pic and os.path.exists(profile_pic):
         st.markdown(f"""
@@ -413,59 +447,68 @@ with st.sidebar:
     # Filters (only on movies page)
     if st.session_state.current_page == "movies":
         st.header("🔍 Filters")
+
+        # FIX: query correta — gêneros ficam na tabela `genres`, não em `movies`
         try:
-            genres_query = "SELECT DISTINCT genre FROM movies ORDER BY genre"
-            genres = pd.read_sql(genres_query, conn)["genre"].tolist()
-        except:
+            genres = pd.read_sql(
+                "SELECT DISTINCT name FROM genres ORDER BY name", conn
+            )["name"].tolist()
+        except Exception as e:
+            logger.error("Error fetching genres: %s", e)
             genres = []
         
         search_title = st.text_input("Search movie title", key="search_title")
         selected_genre = st.selectbox("Select genre", ["All"] + genres, key="selected_genre")
         min_rating = st.slider("Minimum rating", 0.0, 10.0, 8.0, key="min_rating")
     else:
-        # On profile page, show logout button only
+        search_title = ""
+        selected_genre = "All"
+        min_rating = 0.0
         if st.button("🚪 Logout", use_container_width=True, type="primary"):
-            for key in ['user_id', 'username', 'login_time', 'chat_messages', 'current_page']:
-                if key in st.session_state:
-                    if key == 'chat_messages':
-                        st.session_state[key] = []
-                    elif key == 'current_page':
-                        st.session_state[key] = 'movies'
-                    else:
-                        st.session_state[key] = None
+            for key in ['user_id', 'username', 'login_time', 'remember_me', 'chat_messages', 'current_page']:
+                if key == 'chat_messages':
+                    st.session_state[key] = []
+                elif key == 'current_page':
+                    st.session_state[key] = 'movies'
+                elif key == 'remember_me':
+                    st.session_state[key] = False
+                else:
+                    st.session_state[key] = None
             st.rerun()
 
 # ==============================
-# OMDB FETCH FUNCTION (improved)
+# OMDB FETCH FUNCTION
 # ==============================
 def fetch_movie_from_api(title):
     if not OMDB_API_KEY:
         st.error("OMDB_API_KEY not found.")
         return None
+    try:
+        url = f"http://www.omdbapi.com/?t={title}&type=movie&apikey={OMDB_API_KEY}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
 
-    # Try exact match with type=movie
-    url = f"http://www.omdbapi.com/?t={title}&type=movie&apikey={OMDB_API_KEY}"
-    response = requests.get(url)
-    data = response.json()
-
-    if data.get("Response") == "True":
-        # Optionally filter by runtime (if available)
-        runtime = data.get("Runtime", "")
-        if runtime != "N/A" and "min" in runtime:
-            try:
-                minutes = int(runtime.replace(" min", ""))
-                if minutes < 30:
-                    st.warning("This appears to be a short film (<30min).")
-            except:
-                pass
-        return {
-            "Title": data.get("Title"),
-            "Year": data.get("Year"),
-            "Genre": data.get("Genre"),
-            "Rating": data.get("imdbRating"),
-            "Votes": data.get("imdbVotes"),
-            "Plot": data.get("Plot")
-        }
+        if data.get("Response") == "True":
+            runtime = data.get("Runtime", "")
+            if runtime != "N/A" and "min" in runtime:
+                try:
+                    minutes = int(runtime.replace(" min", ""))
+                    if minutes < 30:
+                        st.warning("This appears to be a short film (<30min).")
+                except ValueError:
+                    pass
+            return {
+                "Title": data.get("Title"),
+                "Year": data.get("Year"),
+                "Genre": data.get("Genre"),
+                "Rating": data.get("imdbRating"),
+                "Votes": data.get("imdbVotes"),
+                "Plot": data.get("Plot")
+            }
+    except requests.RequestException as e:
+        logger.error("OMDB API request failed: %s", e)
+        st.error("Failed to reach OMDB API. Please try again.")
     return None
 
 # ==============================
@@ -474,18 +517,22 @@ def fetch_movie_from_api(title):
 def fetch_trailer(title):
     if not YOUTUBE_API_KEY:
         return None
-    search_url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "part": "snippet",
-        "q": f"{title} official trailer",
-        "key": YOUTUBE_API_KEY,
-        "type": "video",
-        "maxResults": 1
-    }
-    response = requests.get(search_url, params=params)
-    data = response.json()
-    if "items" in data and len(data["items"]) > 0:
-        return data["items"][0]["id"]["videoId"]
+    try:
+        search_url = "https://www.googleapis.com/youtube/v3/search"
+        params = {
+            "part": "snippet",
+            "q": f"{title} official trailer",
+            "key": YOUTUBE_API_KEY,
+            "type": "video",
+            "maxResults": 1
+        }
+        response = requests.get(search_url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if "items" in data and len(data["items"]) > 0:
+            return data["items"][0]["id"]["videoId"]
+    except requests.RequestException as e:
+        logger.error("YouTube API request failed: %s", e)
     return None
 
 # ==============================
@@ -504,7 +551,8 @@ def get_movie_context():
         if not df.empty:
             return df.to_string(index=False)
         return "No movies in database yet."
-    except:
+    except Exception as e:
+        logger.error("Error fetching movie context: %s", e)
         return "Database not available."
 
 def get_ai_response(user_message):
@@ -541,22 +589,29 @@ User: {user_message} [/INST]"""
         elif response.status_code == 503:
             return "The AI model is loading. Please try again in 10 seconds."
         else:
+            logger.error("HuggingFace API error %s: %s", response.status_code, response.text)
             return f"Error {response.status_code}. Please try again."
     except requests.exceptions.Timeout:
         return "Request timed out. Please try again."
     except Exception as e:
+        logger.error("Unexpected error in get_ai_response: %s", e)
         return f"Error: {str(e)}"
 
 # ==============================
-# PROFILE PAGE DEFINITION
+# PROFILE PAGE
 # ==============================
 def profile_page():
     st.subheader("👤 Your Profile")
     
-    user_data = conn.execute(
-        "SELECT username, email, profile_pic, bio, favorite_genre, joined_date FROM users WHERE id = ?",
-        (st.session_state.user_id,)
-    ).fetchone()
+    try:
+        user_data = conn.execute(
+            "SELECT username, email, profile_pic, bio, favorite_genre, joined_date FROM users WHERE id = ?",
+            (st.session_state.user_id,)
+        ).fetchone()
+    except Exception as e:
+        logger.error("Error fetching user data: %s", e)
+        st.error("Could not load profile data.")
+        return
     
     if user_data:
         username, email, profile_pic, bio, favorite_genre, joined_date = user_data
@@ -591,10 +646,14 @@ def profile_page():
                 if st.button("💾 Save New Picture", use_container_width=True):
                     file_path = save_profile_picture(uploaded_file, username)
                     if file_path:
-                        conn.execute("UPDATE users SET profile_pic = ? WHERE id = ?", (file_path, st.session_state.user_id))
-                        conn.commit()
-                        st.success("Profile picture updated!")
-                        st.rerun()
+                        try:
+                            conn.execute("UPDATE users SET profile_pic = ? WHERE id = ?", (file_path, st.session_state.user_id))
+                            conn.commit()
+                            st.success("Profile picture updated!")
+                            st.rerun()
+                        except Exception as e:
+                            logger.error("Error saving profile pic to DB: %s", e)
+                            st.error("Failed to save picture.")
         
         with col2:
             st.markdown("### Profile Information")
@@ -603,9 +662,13 @@ def profile_page():
                 new_email = st.text_input("Email", value=email if email else "", placeholder="your@email.com")
                 new_bio = st.text_area("Bio", value=bio if bio else "", placeholder="Tell us about your movie preferences...", height=100)
                 
-                # Favorite Genre dropdown
-                genres_df = pd.read_sql("SELECT name FROM genres ORDER BY name", conn)
-                genre_list = ["None"] + genres_df["name"].tolist() if not genres_df.empty else ["None"]
+                try:
+                    genres_df = pd.read_sql("SELECT name FROM genres ORDER BY name", conn)
+                    genre_list = ["None"] + genres_df["name"].tolist() if not genres_df.empty else ["None"]
+                except Exception as e:
+                    logger.error("Error fetching genres for profile: %s", e)
+                    genre_list = ["None"]
+
                 current_genre = favorite_genre if favorite_genre in genre_list else "None"
                 new_genre = st.selectbox("Favorite Genre", genre_list, index=genre_list.index(current_genre) if current_genre in genre_list else 0)
                 
@@ -614,20 +677,29 @@ def profile_page():
                 
                 submitted = st.form_submit_button("💾 Update Profile", use_container_width=True)
                 if submitted:
-                    conn.execute(
-                        "UPDATE users SET email = ?, bio = ?, favorite_genre = ? WHERE id = ?",
-                        (new_email, new_bio, new_genre if new_genre != "None" else None, st.session_state.user_id)
-                    )
-                    conn.commit()
-                    st.success("Profile updated successfully!")
-                    st.rerun()
+                    try:
+                        conn.execute(
+                            "UPDATE users SET email = ?, bio = ?, favorite_genre = ? WHERE id = ?",
+                            (new_email, new_bio, new_genre if new_genre != "None" else None, st.session_state.user_id)
+                        )
+                        conn.commit()
+                        st.success("Profile updated successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        logger.error("Error updating profile: %s", e)
+                        st.error("Failed to update profile.")
     
     # Stats
     st.markdown("---")
     st.subheader("📊 Your Movie Stats")
     col1, col2, col3 = st.columns(3)
     
-    searches = conn.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (st.session_state.user_id,)).fetchone()[0]
+    try:
+        searches = conn.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (st.session_state.user_id,)).fetchone()[0]
+    except Exception as e:
+        logger.error("Error fetching search count: %s", e)
+        searches = 0
+
     with col1:
         st.metric("🔍 Total Searches", searches)
     
@@ -645,19 +717,24 @@ def profile_page():
         """, (st.session_state.user_id,)).fetchone()
         with col2:
             st.metric("🎯 Favorite Genre", fav_genre[0] if fav_genre and fav_genre[0] else "N/A")
-    except:
+    except Exception as e:
+        logger.error("Error fetching favorite genre: %s", e)
         with col2:
             st.metric("🎯 Favorite Genre", "N/A")
     
-    movies_count = conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+    try:
+        movies_count = conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+    except Exception as e:
+        logger.error("Error fetching movies count: %s", e)
+        movies_count = 0
+
     with col3:
         st.metric("📚 Total Movies", movies_count)
 
 # ==============================
-# MAIN CONTENT (based on current page)
+# MAIN CONTENT
 # ==============================
 if st.session_state.current_page == "movies":
-    # Build query for movies
     query = """
     SELECT 
         m.title,
@@ -681,9 +758,13 @@ if st.session_state.current_page == "movies":
         params.append(f"%{search_title}%")
     
     query += " GROUP BY m.id ORDER BY m.rating DESC"
-    df = pd.read_sql(query, conn, params=params)
+
+    try:
+        df = pd.read_sql(query, conn, params=params)
+    except Exception as e:
+        logger.error("Error running movies query: %s", e)
+        df = pd.DataFrame()
     
-    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🎥 Movies", "🏆 Top Rated", "🎯 Similar Movies", "🤖 Chat Assistant"])
     
     with tab1:
@@ -692,12 +773,15 @@ if st.session_state.current_page == "movies":
             st.info("Movie not found in local database. Searching online... 🌐")
             api_movie = fetch_movie_from_api(search_title)
             if api_movie:
-                # Save to history
-                conn.execute(
-                    "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
-                    (st.session_state.user_id, search_title)
-                )
-                conn.commit()
+                # FIX: salva no histórico apenas quando a busca online retorna resultado
+                try:
+                    conn.execute(
+                        "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
+                        (st.session_state.user_id, search_title)
+                    )
+                    conn.commit()
+                except Exception as e:
+                    logger.error("Error saving search history: %s", e)
                 
                 st.subheader("🌍 Online Result")
                 st.write(f"**Title:** {api_movie['Title']}")
@@ -715,83 +799,102 @@ if st.session_state.current_page == "movies":
                     st.warning("Trailer not found.")
                 
                 if st.button("➕ Add to Local Database"):
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT id FROM movies WHERE title = ?", (api_movie["Title"],))
-                    existing = cursor.fetchone()
-                    if not existing:
-                        year = int(api_movie["Year"]) if str(api_movie["Year"]).isdigit() else None
-                        rating = float(api_movie["Rating"]) if api_movie["Rating"] != "N/A" else 0
-                        votes = int(api_movie["Votes"].replace(",", "")) if api_movie["Votes"] != "N/A" else 0
-                        cursor.execute(
-                            "INSERT INTO movies (title, year, rating, votes) VALUES (?, ?, ?, ?)",
-                            (api_movie["Title"], year, rating, votes)
-                        )
-                        movie_id = cursor.lastrowid
-                        genres_list = [g.strip() for g in api_movie["Genre"].split(",")]
-                        for genre in genres_list:
-                            cursor.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre,))
-                            cursor.execute("SELECT id FROM genres WHERE name = ?", (genre,))
-                            genre_id = cursor.fetchone()[0]
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT id FROM movies WHERE title = ?", (api_movie["Title"],))
+                        existing = cursor.fetchone()
+                        if not existing:
+                            year = int(api_movie["Year"]) if str(api_movie["Year"]).isdigit() else None
+                            rating = float(api_movie["Rating"]) if api_movie["Rating"] != "N/A" else 0
+                            votes = int(api_movie["Votes"].replace(",", "")) if api_movie["Votes"] != "N/A" else 0
                             cursor.execute(
-                                "INSERT INTO movie_genres (movie_id, genre_id) VALUES (?, ?)",
-                                (movie_id, genre_id)
+                                "INSERT INTO movies (title, year, rating, votes) VALUES (?, ?, ?, ?)",
+                                (api_movie["Title"], year, rating, votes)
                             )
-                        conn.commit()
-                        st.success("Movie successfully added! 🚀")
+                            movie_id = cursor.lastrowid
+                            genres_list = [g.strip() for g in api_movie["Genre"].split(",")]
+                            for genre in genres_list:
+                                cursor.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre,))
+                                cursor.execute("SELECT id FROM genres WHERE name = ?", (genre,))
+                                genre_id = cursor.fetchone()[0]
+                                cursor.execute(
+                                    "INSERT INTO movie_genres (movie_id, genre_id) VALUES (?, ?)",
+                                    (movie_id, genre_id)
+                                )
+                            conn.commit()
+                            st.success("Movie successfully added! 🚀")
+                        else:
+                            st.info("Movie already exists in the database.")
+                    except Exception as e:
+                        logger.error("Error adding movie to DB: %s", e)
+                        st.error("Failed to add movie to database.")
             else:
                 st.error("Movie not found online either.")
         elif not df.empty:
-            if search_title:
-                conn.execute(
-                    "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
-                    (st.session_state.user_id, search_title)
-                )
-                conn.commit()
+            # FIX: salva no histórico apenas quando há busca explícita por título,
+            # não em toda renderização da página
+            if search_title and st.session_state.get("last_search") != search_title:
+                try:
+                    conn.execute(
+                        "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
+                        (st.session_state.user_id, search_title)
+                    )
+                    conn.commit()
+                    st.session_state.last_search = search_title
+                except Exception as e:
+                    logger.error("Error saving search history: %s", e)
             st.dataframe(df, use_container_width=True)
         else:
             st.info("No movies found with current filters")
     
     with tab2:
         st.subheader("🏆 Top Rated Movies")
-        top_df = pd.read_sql("""
-            SELECT title, year, rating, votes
-            FROM movies
-            WHERE rating IS NOT NULL
-            ORDER BY rating DESC, votes DESC
-            LIMIT 10
-        """, conn)
-        st.dataframe(top_df, use_container_width=True)
+        try:
+            top_df = pd.read_sql("""
+                SELECT title, year, rating, votes
+                FROM movies
+                WHERE rating IS NOT NULL
+                ORDER BY rating DESC, votes DESC
+                LIMIT 10
+            """, conn)
+            st.dataframe(top_df, use_container_width=True)
+        except Exception as e:
+            logger.error("Error fetching top rated movies: %s", e)
+            st.error("Could not load top rated movies.")
     
     with tab3:
         st.subheader("🎯 Find Similar Movies")
-        # Load similarity data
-        sim_query = """
-        SELECT 
-            m.id,
-            m.title,
-            GROUP_CONCAT(g.name, ' ') as genres
-        FROM movies m
-        JOIN movie_genres mg ON m.id = mg.movie_id
-        JOIN genres g ON g.id = mg.genre_id
-        GROUP BY m.id
-        """
-        movies_df = pd.read_sql(sim_query, conn)
-        if not movies_df.empty:
-            movies_df["content"] = movies_df["genres"]
-            vectorizer = TfidfVectorizer(stop_words="english")
-            tfidf_matrix = vectorizer.fit_transform(movies_df["content"])
-            cosine_sim = cosine_similarity(tfidf_matrix)
-            
-            selected_movie = st.selectbox("Choose a movie", movies_df["title"])
-            if selected_movie:
-                idx = movies_df[movies_df["title"] == selected_movie].index[0]
-                sim_scores = list(enumerate(cosine_sim[idx]))
-                sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:6]
-                similar_indices = [i[0] for i in sim_scores]
-                st.write("### 🔥 Similar Movies:")
-                st.write(movies_df["title"].iloc[similar_indices].values)
-        else:
-            st.info("Add movies to the database to see recommendations")
+        try:
+            sim_query = """
+            SELECT 
+                m.id,
+                m.title,
+                GROUP_CONCAT(g.name, ' ') as genres
+            FROM movies m
+            JOIN movie_genres mg ON m.id = mg.movie_id
+            JOIN genres g ON g.id = mg.genre_id
+            GROUP BY m.id
+            """
+            movies_df = pd.read_sql(sim_query, conn)
+            if not movies_df.empty:
+                movies_df["content"] = movies_df["genres"]
+                vectorizer = TfidfVectorizer(stop_words="english")
+                tfidf_matrix = vectorizer.fit_transform(movies_df["content"])
+                cosine_sim = cosine_similarity(tfidf_matrix)
+                
+                selected_movie = st.selectbox("Choose a movie", movies_df["title"])
+                if selected_movie:
+                    idx = movies_df[movies_df["title"] == selected_movie].index[0]
+                    sim_scores = list(enumerate(cosine_sim[idx]))
+                    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:6]
+                    similar_indices = [i[0] for i in sim_scores]
+                    st.write("### 🔥 Similar Movies:")
+                    st.write(movies_df["title"].iloc[similar_indices].values)
+            else:
+                st.info("Add movies to the database to see recommendations")
+        except Exception as e:
+            logger.error("Error in similar movies: %s", e)
+            st.error("Could not load similarity data.")
     
     with tab4:
         st.subheader("🤖 AI Movie Assistant (Powered by Hugging Face)")
