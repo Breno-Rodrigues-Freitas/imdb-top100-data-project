@@ -8,6 +8,7 @@ import hmac
 import re
 import base64
 import logging
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -106,6 +107,13 @@ conn.commit()
 MIN_PASSWORD_LENGTH = 6
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_TIME = 15  # minutes
+
+# ==============================
+# API / HISTORY CONSTANTS
+# ==============================
+API_MAX_RETRIES = 3        # tentativas máximas para chamadas de API
+API_RETRY_DELAY = 1.5      # segundos entre tentativas (backoff fixo)
+HISTORY_LIMIT = 100        # máximo de registros de histórico por usuário
 
 # ==============================
 # PASSWORD HASHING FUNCTIONS
@@ -477,39 +485,110 @@ with st.sidebar:
             st.rerun()
 
 # ==============================
+# HISTORY HELPERS
+# ==============================
+def save_to_history(user_id: int, movie_title: str):
+    """Salva busca no histórico e garante que o limite por usuário seja respeitado."""
+    try:
+        conn.execute(
+            "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
+            (user_id, movie_title)
+        )
+        # Remove os registros mais antigos que ultrapassem o limite
+        conn.execute("""
+            DELETE FROM history
+            WHERE user_id = ?
+              AND id NOT IN (
+                  SELECT id FROM history
+                  WHERE user_id = ?
+                  ORDER BY searched_at DESC
+                  LIMIT ?
+              )
+        """, (user_id, user_id, HISTORY_LIMIT))
+        conn.commit()
+    except Exception as e:
+        logger.error("Error saving search history for user %s: %s", user_id, e)
+
+
+# ==============================
+# HTTP RETRY HELPER
+# ==============================
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response | None:
+    """Faz uma requisição HTTP com retry exponencial.
+    
+    Tenta até API_MAX_RETRIES vezes em caso de erro de rede ou status 5xx.
+    Retorna None se todas as tentativas falharem.
+    """
+    for attempt in range(1, API_MAX_RETRIES + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code < 500:
+                # Qualquer resposta que não seja erro de servidor é retornada
+                # (erros 4xx como 404 são válidos e não devem ser retentados)
+                return response
+            logger.warning(
+                "Attempt %d/%d — server error %s for %s",
+                attempt, API_MAX_RETRIES, response.status_code, url
+            )
+        except requests.ConnectionError as e:
+            logger.warning("Attempt %d/%d — connection error: %s", attempt, API_MAX_RETRIES, e)
+        except requests.Timeout as e:
+            logger.warning("Attempt %d/%d — timeout: %s", attempt, API_MAX_RETRIES, e)
+
+        if attempt < API_MAX_RETRIES:
+            time.sleep(API_RETRY_DELAY * attempt)  # backoff: 1.5s, 3s
+
+    logger.error("All %d attempts failed for %s", API_MAX_RETRIES, url)
+    return None
+
+
+# ==============================
 # OMDB FETCH FUNCTION
 # ==============================
 def fetch_movie_from_api(title):
     if not OMDB_API_KEY:
         st.error("OMDB_API_KEY not found.")
         return None
-    try:
-        url = f"http://www.omdbapi.com/?t={title}&type=movie&apikey={OMDB_API_KEY}"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
 
-        if data.get("Response") == "True":
-            runtime = data.get("Runtime", "")
-            if runtime != "N/A" and "min" in runtime:
-                try:
-                    minutes = int(runtime.replace(" min", ""))
-                    if minutes < 30:
-                        st.warning("This appears to be a short film (<30min).")
-                except ValueError:
-                    pass
-            return {
-                "Title": data.get("Title"),
-                "Year": data.get("Year"),
-                "Genre": data.get("Genre"),
-                "Rating": data.get("imdbRating"),
-                "Votes": data.get("imdbVotes"),
-                "Plot": data.get("Plot")
-            }
-    except requests.RequestException as e:
-        logger.error("OMDB API request failed: %s", e)
-        st.error("Failed to reach OMDB API. Please try again.")
+    # requests.get com params faz URL encoding automático do título
+    response = _request_with_retry(
+        "GET",
+        "http://www.omdbapi.com/",
+        params={"t": title, "type": "movie", "apikey": OMDB_API_KEY},
+        timeout=10,
+    )
+
+    if response is None:
+        st.error("Could not reach OMDB API after several attempts. Please try again later.")
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        logger.error("OMDB returned non-JSON response: %s", response.text[:200])
+        st.error("Unexpected response from OMDB API.")
+        return None
+
+    if data.get("Response") == "True":
+        runtime = data.get("Runtime", "")
+        if runtime not in ("N/A", "") and "min" in runtime:
+            try:
+                if int(runtime.replace(" min", "")) < 30:
+                    st.warning("This appears to be a short film (<30min).")
+            except ValueError:
+                pass
+        return {
+            "Title": data.get("Title"),
+            "Year": data.get("Year"),
+            "Genre": data.get("Genre"),
+            "Rating": data.get("imdbRating"),
+            "Votes": data.get("imdbVotes"),
+            "Plot": data.get("Plot"),
+        }
+
+    logger.info("OMDB found no result for title: '%s'", title)
     return None
+
 
 # ==============================
 # YOUTUBE TRAILER FUNCTION
@@ -517,22 +596,32 @@ def fetch_movie_from_api(title):
 def fetch_trailer(title):
     if not YOUTUBE_API_KEY:
         return None
-    try:
-        search_url = "https://www.googleapis.com/youtube/v3/search"
-        params = {
+
+    response = _request_with_retry(
+        "GET",
+        "https://www.googleapis.com/youtube/v3/search",
+        params={
             "part": "snippet",
             "q": f"{title} official trailer",
             "key": YOUTUBE_API_KEY,
             "type": "video",
-            "maxResults": 1
-        }
-        response = requests.get(search_url, params=params, timeout=10)
-        response.raise_for_status()
+            "maxResults": 1,
+        },
+        timeout=10,
+    )
+
+    if response is None:
+        logger.error("YouTube API unreachable after retries for title: '%s'", title)
+        return None
+
+    try:
         data = response.json()
-        if "items" in data and len(data["items"]) > 0:
-            return data["items"][0]["id"]["videoId"]
-    except requests.RequestException as e:
-        logger.error("YouTube API request failed: %s", e)
+        items = data.get("items", [])
+        if items:
+            return items[0]["id"]["videoId"]
+    except (ValueError, KeyError) as e:
+        logger.error("Error parsing YouTube response: %s", e)
+
     return None
 
 # ==============================
@@ -704,19 +793,26 @@ def profile_page():
         st.metric("🔍 Total Searches", searches)
     
     try:
-        fav_genre = conn.execute("""
-            SELECT g.name, COUNT(*) as count
-            FROM history h
-            LEFT JOIN movies m ON m.title LIKE '%' || h.movie_title || '%'
-            LEFT JOIN movie_genres mg ON m.id = mg.movie_id
-            LEFT JOIN genres g ON g.id = mg.genre_id
-            WHERE h.user_id = ?
-            GROUP BY g.name
-            ORDER BY count DESC
-            LIMIT 1
-        """, (st.session_state.user_id,)).fetchone()
+        # Query otimizada: busca direto no histórico + movie_genres sem o LIKE custoso.
+        # Usa cache de 5 minutos para não re-executar a cada re-render do perfil.
+        @st.cache_data(ttl=300)
+        def get_favorite_genre(user_id: int) -> str:
+            row = conn.execute("""
+                SELECT g.name
+                FROM history h
+                JOIN movies m ON m.title = h.movie_title
+                JOIN movie_genres mg ON mg.movie_id = m.id
+                JOIN genres g ON g.id = mg.genre_id
+                WHERE h.user_id = ?
+                GROUP BY g.name
+                ORDER BY COUNT(*) DESC
+                LIMIT 1
+            """, (user_id,)).fetchone()
+            return row[0] if row else "N/A"
+
+        fav_genre_name = get_favorite_genre(st.session_state.user_id)
         with col2:
-            st.metric("🎯 Favorite Genre", fav_genre[0] if fav_genre and fav_genre[0] else "N/A")
+            st.metric("🎯 Favorite Genre", fav_genre_name)
     except Exception as e:
         logger.error("Error fetching favorite genre: %s", e)
         with col2:
@@ -773,15 +869,8 @@ if st.session_state.current_page == "movies":
             st.info("Movie not found in local database. Searching online... 🌐")
             api_movie = fetch_movie_from_api(search_title)
             if api_movie:
-                # FIX: salva no histórico apenas quando a busca online retorna resultado
-                try:
-                    conn.execute(
-                        "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
-                        (st.session_state.user_id, search_title)
-                    )
-                    conn.commit()
-                except Exception as e:
-                    logger.error("Error saving search history: %s", e)
+                # Salva no histórico com controle de limite
+                save_to_history(st.session_state.user_id, search_title)
                 
                 st.subheader("🌍 Online Result")
                 st.write(f"**Title:** {api_movie['Title']}")
@@ -831,18 +920,10 @@ if st.session_state.current_page == "movies":
             else:
                 st.error("Movie not found online either.")
         elif not df.empty:
-            # FIX: salva no histórico apenas quando há busca explícita por título,
-            # não em toda renderização da página
+            # Salva no histórico apenas quando há busca nova (não em toda re-renderização)
             if search_title and st.session_state.get("last_search") != search_title:
-                try:
-                    conn.execute(
-                        "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
-                        (st.session_state.user_id, search_title)
-                    )
-                    conn.commit()
-                    st.session_state.last_search = search_title
-                except Exception as e:
-                    logger.error("Error saving search history: %s", e)
+                save_to_history(st.session_state.user_id, search_title)
+                st.session_state.last_search = search_title
             st.dataframe(df, use_container_width=True)
         else:
             st.info("No movies found with current filters")
