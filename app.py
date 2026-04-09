@@ -38,6 +38,7 @@ st.set_page_config(
     page_title="CineVault",
     page_icon="🎬",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # ==============================
@@ -78,6 +79,17 @@ html, body, [data-testid="stAppViewContainer"] {
 /* ── Hide Streamlit chrome ── */
 #MainMenu, footer, header { visibility: hidden; }
 [data-testid="stToolbar"] { display: none; }
+
+/* ── Força sidebar sempre aberta e visível ── */
+[data-testid="stSidebar"] {
+    min-width: 260px !important;
+    max-width: 320px !important;
+    transform: none !important;
+    visibility: visible !important;
+}
+[data-testid="stSidebarCollapsedControl"] { display: none !important; }
+[data-testid="collapsedControl"] { display: none !important; }
+section[data-testid="stSidebar"] > div { width: 100% !important; }
 
 /* ── Sidebar ── */
 [data-testid="stSidebar"] {
@@ -707,12 +719,16 @@ with st.sidebar:
     
     # Navigation
     st.markdown("### Navigation")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🎬 Movies", use_container_width=True, type="primary" if st.session_state.current_page == "movies" else "secondary"):
             st.session_state.current_page = "movies"
             st.rerun()
     with col2:
+        if st.button("🕐 History", use_container_width=True, type="primary" if st.session_state.current_page == "history" else "secondary"):
+            st.session_state.current_page = "history"
+            st.rerun()
+    with col3:
         if st.button("👤 Profile", use_container_width=True, type="primary" if st.session_state.current_page == "profile" else "secondary"):
             st.session_state.current_page = "profile"
             st.rerun()
@@ -1094,7 +1110,159 @@ def profile_page():
         st.metric("📚 Total Movies", movies_count)
 
 # ==============================
-# MAIN CONTENT
+# HISTORY PAGE
+# ==============================
+def history_page():
+    st.subheader("🕐 Search History")
+
+    # ── Controles ──────────────────────────────────────────────
+    col_search, col_sort, col_clear = st.columns([3, 2, 1])
+    with col_search:
+        filter_text = st.text_input("Filter by title", placeholder="Type to filter...", label_visibility="collapsed")
+    with col_sort:
+        sort_order = st.selectbox("Order", ["Newest first", "Oldest first", "A → Z", "Z → A"], label_visibility="collapsed")
+    with col_clear:
+        if st.button("🗑️ Clear all", use_container_width=True, type="secondary"):
+            try:
+                conn.execute("DELETE FROM history WHERE user_id = ?", (st.session_state.user_id,))
+                conn.commit()
+                st.success("History cleared.")
+                st.rerun()
+            except Exception as e:
+                logger.error("Error clearing history: %s", e)
+                st.error("Could not clear history.")
+
+    st.markdown("---")
+
+    # ── Buscar registros ───────────────────────────────────────
+    try:
+        order_sql = {
+            "Newest first": "searched_at DESC",
+            "Oldest first": "searched_at ASC",
+            "A → Z":        "movie_title ASC",
+            "Z → A":        "movie_title DESC",
+        }[sort_order]
+
+        history_df = pd.read_sql(f"""
+            SELECT
+                id,
+                movie_title,
+                searched_at
+            FROM history
+            WHERE user_id = ?
+            ORDER BY {order_sql}
+        """, conn, params=(st.session_state.user_id,))
+    except Exception as e:
+        logger.error("Error fetching history: %s", e)
+        st.error("Could not load history.")
+        return
+
+    # ── Filtro por texto ───────────────────────────────────────
+    if filter_text:
+        history_df = history_df[
+            history_df["movie_title"].str.contains(filter_text, case=False, na=False)
+        ]
+
+    # ── Resumo ─────────────────────────────────────────────────
+    total = len(history_df)
+    unique = history_df["movie_title"].nunique() if not history_df.empty else 0
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("📋 Total Searches", total)
+    with m2:
+        st.metric("🎬 Unique Movies", unique)
+    with m3:
+        limit_pct = f"{total}/{HISTORY_LIMIT}"
+        st.metric("📦 History Usage", limit_pct)
+
+    st.markdown("---")
+
+    # ── Lista de itens ─────────────────────────────────────────
+    if history_df.empty:
+        st.markdown("""
+        <div style="
+            text-align: center;
+            padding: 3rem;
+            color: #6b6b80;
+            border: 1px dashed #ffffff12;
+            border-radius: 12px;
+            margin-top: 1rem;
+        ">
+            <div style="font-size: 3rem; margin-bottom: 0.5rem;">🎬</div>
+            <div style="font-family: 'Bebas Neue', sans-serif; font-size: 1.4rem; letter-spacing: 2px;">
+                No searches yet
+            </div>
+            <div style="font-size: 0.85rem; margin-top: 0.25rem;">
+                Start searching for movies to build your history
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Renderizar cada item como card com botão de deletar e re-buscar
+    for _, row in history_df.iterrows():
+        record_id   = row["id"]
+        movie_title = row["movie_title"]
+        searched_at = row["searched_at"]
+
+        # Formatar data
+        try:
+            dt = datetime.strptime(searched_at[:19], "%Y-%m-%d %H:%M:%S")
+            date_str = dt.strftime("%d %b %Y · %H:%M")
+        except Exception:
+            date_str = searched_at
+
+        col_info, col_search_btn, col_del = st.columns([6, 1, 1])
+
+        with col_info:
+            st.markdown(f"""
+            <div style="
+                background: #1a1a24;
+                border: 1px solid #ffffff12;
+                border-radius: 10px;
+                padding: 12px 16px;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            ">
+                <div style="
+                    background: linear-gradient(135deg, #e8b84b22, #c0392b22);
+                    border: 1px solid #e8b84b33;
+                    border-radius: 8px;
+                    width: 36px; height: 36px;
+                    display: flex; align-items: center; justify-content: center;
+                    font-size: 1.1rem; flex-shrink: 0;
+                ">🎬</div>
+                <div>
+                    <div style="font-weight: 600; color: #e8e8f0; font-size: 0.95rem;">{movie_title}</div>
+                    <div style="font-size: 0.75rem; color: #6b6b80; margin-top: 2px;">🕐 {date_str}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_search_btn:
+            if st.button("🔍", key=f"search_{record_id}", help=f"Search '{movie_title}' again", use_container_width=True):
+                st.session_state.current_page = "movies"
+                st.session_state["search_title"] = movie_title
+                st.rerun()
+
+        with col_del:
+            if st.button("✕", key=f"del_{record_id}", help="Remove this entry", use_container_width=True):
+                try:
+                    conn.execute("DELETE FROM history WHERE id = ? AND user_id = ?", (record_id, st.session_state.user_id))
+                    conn.commit()
+                    st.rerun()
+                except Exception as e:
+                    logger.error("Error deleting history entry %s: %s", record_id, e)
+
+    # ── Paginação simples via expander se lista grande ─────────
+    if total > 20:
+        st.caption(f"Showing {min(total, 20)} of {total} entries. Use the filter above to narrow results.")
+
+
+# ==============================
+# PAGE ROUTING
 # ==============================
 if st.session_state.current_page == "movies":
     query = """
@@ -1259,4 +1427,7 @@ if st.session_state.current_page == "movies":
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
 
 else:
-    profile_page()
+    if st.session_state.current_page == "history":
+        history_page()
+    else:
+        profile_page()
