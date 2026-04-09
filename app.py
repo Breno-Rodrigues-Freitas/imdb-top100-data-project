@@ -334,25 +334,31 @@ conn = get_connection()
 # ==============================
 conn.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE,
+    password      TEXT,
+    email         TEXT,
+    profile_pic   TEXT,
+    bio           TEXT,
+    favorite_genre TEXT,
+    joined_date   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
 # Add profile columns (if not exist) — log errors instead of silencing them
 _profile_columns = {
-    "email": "TEXT",
-    "profile_pic": "TEXT",
-    "bio": "TEXT",
-    "favorite_genre": "TEXT",
-    "joined_date": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "email":          "TEXT DEFAULT ''",
+    "profile_pic":    "TEXT DEFAULT ''",
+    "bio":            "TEXT DEFAULT ''",
+    "favorite_genre": "TEXT DEFAULT ''",
+    "joined_date":    "TEXT DEFAULT ''",
 }
 for col, col_type in _profile_columns.items():
     try:
         conn.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+        conn.commit()
     except sqlite3.OperationalError:
-        pass  # Column already exists — expected on every run after the first
+        pass  # coluna já existe — comportamento esperado em toda execução após a primeira
     except Exception as e:
         logger.error("Error adding column '%s': %s", col, e)
 
@@ -974,15 +980,37 @@ User: {user_message} [/INST]"""
 # ==============================
 def profile_page():
     st.subheader("👤 Your Profile")
-    
+
+    # Migração defensiva: garante cada coluna antes de qualquer query
+    _migration_columns = {
+        "email":          "TEXT DEFAULT ''",
+        "profile_pic":    "TEXT DEFAULT ''",
+        "bio":            "TEXT DEFAULT ''",
+        "favorite_genre": "TEXT DEFAULT ''",
+        "joined_date":    "TEXT DEFAULT ''",
+    }
+    for col, col_type in _migration_columns.items():
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # coluna já existe — comportamento esperado
+
     try:
-        user_data = conn.execute(
-            "SELECT username, email, profile_pic, bio, favorite_genre, joined_date FROM users WHERE id = ?",
-            (st.session_state.user_id,)
-        ).fetchone()
+        user_data = conn.execute("""
+            SELECT
+                username,
+                COALESCE(email, '')          AS email,
+                COALESCE(profile_pic, '')    AS profile_pic,
+                COALESCE(bio, '')            AS bio,
+                COALESCE(favorite_genre, '') AS favorite_genre,
+                COALESCE(joined_date, '')    AS joined_date
+            FROM users
+            WHERE id = ?
+        """, (st.session_state.user_id,)).fetchone()
     except Exception as e:
         logger.error("Error fetching user data: %s", e)
-        st.error("Could not load profile data.")
+        st.error(f"Could not load profile data. Details: {e}")
         return
     
     if user_data:
