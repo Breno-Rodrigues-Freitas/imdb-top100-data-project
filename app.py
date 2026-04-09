@@ -34,8 +34,276 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 # ==============================
 # CONFIG
 # ==============================
-st.set_page_config(page_title="IMDB Movie Recommender", layout="wide")
-st.title("🎬 IMDB Movie Recommender - Hybrid Version")
+st.set_page_config(
+    page_title="CineVault",
+    page_icon="🎬",
+    layout="wide",
+)
+
+# ==============================
+# GLOBAL CSS — CineVault Design
+# ==============================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+/* ── Variables ── */
+:root {
+    --bg:         #0a0a0f;
+    --surface:    #111118;
+    --surface2:   #1a1a24;
+    --border:     #ffffff12;
+    --accent:     #e8b84b;
+    --accent2:    #c0392b;
+    --text:       #e8e8f0;
+    --muted:      #6b6b80;
+    --radius:     12px;
+    --font-head:  'Bebas Neue', sans-serif;
+    --font-body:  'DM Sans', sans-serif;
+}
+
+/* ── Base ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: var(--font-body) !important;
+}
+
+[data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(ellipse 80% 40% at 50% -10%, #e8b84b18 0%, transparent 60%),
+        var(--bg) !important;
+}
+
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer, header { visibility: hidden; }
+[data-testid="stToolbar"] { display: none; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: var(--surface) !important;
+    border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] > div:first-child { padding-top: 1.5rem; }
+
+/* ── Main title ── */
+[data-testid="stAppViewContainer"] h1 {
+    font-family: var(--font-head) !important;
+    font-size: 3.2rem !important;
+    letter-spacing: 3px !important;
+    background: linear-gradient(90deg, var(--accent) 0%, #fff 60%);
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    background-clip: text !important;
+    margin-bottom: 0.25rem !important;
+}
+
+/* ── Subheaders ── */
+h2, h3 {
+    font-family: var(--font-head) !important;
+    letter-spacing: 2px !important;
+    color: var(--text) !important;
+}
+
+/* ── Tabs ── */
+[data-testid="stTabs"] [role="tablist"] {
+    background: var(--surface2) !important;
+    border-radius: var(--radius) !important;
+    padding: 4px !important;
+    gap: 4px !important;
+    border: 1px solid var(--border) !important;
+}
+[data-testid="stTabs"] button[role="tab"] {
+    font-family: var(--font-body) !important;
+    font-weight: 500 !important;
+    font-size: 0.85rem !important;
+    color: var(--muted) !important;
+    border-radius: 8px !important;
+    padding: 6px 16px !important;
+    transition: all 0.2s !important;
+    border: none !important;
+}
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    background: var(--accent) !important;
+    color: #000 !important;
+    font-weight: 600 !important;
+}
+[data-testid="stTabs"] [role="tabpanel"] {
+    padding-top: 1.5rem !important;
+}
+
+/* ── Dataframe / Table ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    overflow: hidden !important;
+}
+[data-testid="stDataFrame"] thead th {
+    background: var(--surface2) !important;
+    color: var(--accent) !important;
+    font-family: var(--font-head) !important;
+    letter-spacing: 1.5px !important;
+    font-size: 0.8rem !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+[data-testid="stDataFrame"] tbody tr:nth-child(even) td {
+    background: var(--surface2) !important;
+}
+[data-testid="stDataFrame"] tbody tr:hover td {
+    background: #e8b84b12 !important;
+}
+
+/* ── Buttons ── */
+[data-testid="stButton"] button {
+    font-family: var(--font-body) !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    transition: all 0.2s !important;
+    border: 1px solid var(--border) !important;
+}
+[data-testid="stButton"] button[kind="primary"] {
+    background: var(--accent) !important;
+    color: #000 !important;
+    border-color: var(--accent) !important;
+}
+[data-testid="stButton"] button[kind="primary"]:hover {
+    background: #f5c842 !important;
+    box-shadow: 0 0 20px #e8b84b50 !important;
+    transform: translateY(-1px) !important;
+}
+[data-testid="stButton"] button[kind="secondary"] {
+    background: var(--surface2) !important;
+    color: var(--text) !important;
+}
+[data-testid="stButton"] button[kind="secondary"]:hover {
+    background: var(--surface) !important;
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+}
+
+/* ── Inputs ── */
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    color: var(--text) !important;
+    font-family: var(--font-body) !important;
+    transition: border-color 0.2s !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px #e8b84b20 !important;
+}
+
+/* ── Selectbox ── */
+[data-testid="stSelectbox"] > div > div {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    color: var(--text) !important;
+}
+
+/* ── Slider ── */
+[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"] {
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+}
+[data-testid="stSlider"] [data-baseweb="slider"] div[class*="Track"] {
+    background: var(--surface2) !important;
+}
+
+/* ── Metrics ── */
+[data-testid="stMetric"] {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    padding: 1rem 1.25rem !important;
+    transition: border-color 0.2s !important;
+}
+[data-testid="stMetric"]:hover {
+    border-color: var(--accent) !important;
+}
+[data-testid="stMetricLabel"] {
+    color: var(--muted) !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 1px !important;
+}
+[data-testid="stMetricValue"] {
+    color: var(--accent) !important;
+    font-family: var(--font-head) !important;
+    font-size: 2rem !important;
+    letter-spacing: 1px !important;
+}
+
+/* ── Alerts / Info / Success / Error ── */
+[data-testid="stAlert"] {
+    border-radius: var(--radius) !important;
+    border: 1px solid var(--border) !important;
+    background: var(--surface2) !important;
+}
+
+/* ── Forms ── */
+[data-testid="stForm"] {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    padding: 1.5rem !important;
+}
+
+/* ── Spinner / Chat ── */
+[data-testid="stChatMessage"] {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    margin-bottom: 0.75rem !important;
+}
+[data-testid="stChatInputContainer"] {
+    background: var(--surface) !important;
+    border-top: 1px solid var(--border) !important;
+}
+[data-testid="stChatInputContainer"] textarea {
+    background: var(--surface2) !important;
+    color: var(--text) !important;
+    border-radius: 8px !important;
+}
+
+/* ── Sidebar section labels ── */
+[data-testid="stSidebar"] h3 {
+    font-family: var(--font-head) !important;
+    letter-spacing: 2px !important;
+    font-size: 1.1rem !important;
+    color: var(--muted) !important;
+}
+
+/* ── Dividers ── */
+hr {
+    border-color: var(--border) !important;
+    margin: 1.5rem 0 !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    background: var(--surface2) !important;
+    border: 1px dashed var(--border) !important;
+    border-radius: var(--radius) !important;
+    padding: 1rem !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: var(--accent) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🎬 CineVault")
 
 # ==============================
 # DATABASE CONNECTION
@@ -387,53 +655,52 @@ with st.sidebar:
     if profile_pic and os.path.exists(profile_pic):
         st.markdown(f"""
         <div style="
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            background: linear-gradient(135deg, #1a1a24 0%, #111118 100%);
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            border: 1px solid #ffffff12;
         ">
-            <div style="display: flex; align-items: center; gap: 15px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
                 <img src="data:image/png;base64,{get_profile_pic_base64(profile_pic)}" 
-                     style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; border: 2px solid white;">
-                <div style="color: white;">
-                    <div style="font-size: 18px; font-weight: 600;">{st.session_state.username}</div>
-                    <div style="font-size: 12px; opacity: 0.9;">
+                     style="width: 44px; height: 44px; border-radius: 50%; object-fit: cover; border: 2px solid #e8b84b;">
+                <div>
+                    <div style="font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; letter-spacing: 2px; color: #e8e8f0;">{st.session_state.username}</div>
+                    <div style="font-size: 0.72rem; color: #6b6b80; letter-spacing: 0.5px;">
                         🕐 {st.session_state.login_time.strftime("%H:%M") if st.session_state.login_time else "now"}
                     </div>
                 </div>
+                <div style="margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: #2ecc71;"></div>
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
+        initial = st.session_state.username[0].upper() if st.session_state.username else '?'
         st.markdown(f"""
         <div style="
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            background: linear-gradient(135deg, #1a1a24 0%, #111118 100%);
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            border: 1px solid #ffffff12;
         ">
-            <div style="display: flex; align-items: center; gap: 15px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
                 <div style="
-                    background: white;
-                    width: 50px;
-                    height: 50px;
+                    background: linear-gradient(135deg, #e8b84b, #c0392b);
+                    width: 44px; height: 44px;
                     border-radius: 50%;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-size: 24px;
-                    color: #667eea;
-                ">
-                    {st.session_state.username[0].upper() if st.session_state.username else '👤'}
-                </div>
-                <div style="color: white;">
-                    <div style="font-size: 18px; font-weight: 600;">{st.session_state.username}</div>
-                    <div style="font-size: 12px; opacity: 0.9;">
+                    display: flex; align-items: center; justify-content: center;
+                    font-family: 'Bebas Neue', sans-serif;
+                    font-size: 1.4rem; color: #000;
+                    flex-shrink: 0;
+                ">{initial}</div>
+                <div>
+                    <div style="font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; letter-spacing: 2px; color: #e8e8f0;">{st.session_state.username}</div>
+                    <div style="font-size: 0.72rem; color: #6b6b80; letter-spacing: 0.5px;">
                         🕐 {st.session_state.login_time.strftime("%H:%M") if st.session_state.login_time else "now"}
                     </div>
                 </div>
+                <div style="margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: #2ecc71;"></div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -712,20 +979,19 @@ def profile_page():
             if profile_pic and os.path.exists(profile_pic):
                 st.image(profile_pic, width=200, caption="Current Photo")
             else:
+                initial = username[0].upper() if username else '?'
                 st.markdown(f"""
                 <div style='
-                    width: 200px;
-                    height: 200px;
+                    width: 160px; height: 160px;
                     border-radius: 50%;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-size: 80px;
-                    color: white;
+                    background: linear-gradient(135deg, #e8b84b, #c0392b);
+                    display: flex; align-items: center; justify-content: center;
+                    font-family: "Bebas Neue", sans-serif;
+                    font-size: 72px; color: #000;
                     margin-bottom: 20px;
+                    border: 3px solid #ffffff12;
                 '>
-                    {username[0].upper() if username else '👤'}
+                    {initial}
                 </div>
                 """, unsafe_allow_html=True)
             
