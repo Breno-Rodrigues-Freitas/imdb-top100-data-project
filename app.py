@@ -30,6 +30,7 @@ load_dotenv()
 OMDB_API_KEY = os.getenv("OMDB_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # ==============================
 # CONFIG
@@ -934,43 +935,64 @@ def get_movie_context():
         return "Database not available."
 
 def get_ai_response(user_message):
-    if not HUGGINGFACE_API_KEY:
-        return "AI service not configured. Please check your HUGGINGFACE_API_KEY."
+    if not GOOGLE_API_KEY:
+        return "❌ GOOGLE_API_KEY not found. Please add it to your .env file."
     try:
-        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
-        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
         movie_context = get_movie_context()
-        prompt = f"""<s>[INST] You are a movie assistant. Here are some movies in the database:
+
+        # Modelos disponíveis na conta, em ordem de preferência
+        models = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ]
+
+        prompt = f"""You are CineVault, a friendly and knowledgeable movie assistant.
+Here are some top movies in the database:
 {movie_context}
 
-Answer questions about movies. Keep answers short and helpful.
+Answer questions about movies concisely and helpfully.
+If asked for recommendations, use the movies above when relevant.
+Keep answers under 150 words.
 
-User: {user_message} [/INST]"""
+User: {user_message}"""
+
         payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 150,
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
                 "temperature": 0.7,
-                "do_sample": True
+                "maxOutputTokens": 300,
             }
         }
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], dict) and 'generated_text' in result[0]:
-                    return result[0]['generated_text'].split('[/INST]')[-1].strip()
-                return str(result[0])
-            elif isinstance(result, dict) and 'generated_text' in result:
-                return result['generated_text'].split('[/INST]')[-1].strip()
-            return "I received a response but couldn't understand it."
-        elif response.status_code == 503:
-            return "The AI model is loading. Please try again in 10 seconds."
-        else:
-            logger.error("HuggingFace API error %s: %s", response.status_code, response.text)
-            return f"Error {response.status_code}. Please try again."
+
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GOOGLE_API_KEY}"
+            response = requests.post(url, json=payload, timeout=30)
+
+            if response.status_code == 200:
+                result = response.json()
+                text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                return text if text else "I couldn't generate a response. Please try again."
+            elif response.status_code == 404:
+                logger.warning("Gemini model '%s' not found, trying next...", model)
+                continue
+            elif response.status_code == 429:
+                return "⏳ Rate limit reached. Please wait a moment and try again."
+            elif response.status_code == 400:
+                error_msg = response.json().get("error", {}).get("message", response.text)
+                logger.error("Gemini bad request for model '%s': %s", model, error_msg)
+                return f"❌ API error: {error_msg}"
+            else:
+                logger.error("Gemini error %s for model '%s': %s", response.status_code, model, response.text[:200])
+                continue
+
+        return "❌ No Gemini models available. Please check your GOOGLE_API_KEY in the .env file."
+
     except requests.exceptions.Timeout:
-        return "Request timed out. Please try again."
+        return "⏱️ Request timed out. Please try again."
+    except KeyError as e:
+        logger.error("Unexpected Gemini response format: %s", e)
+        return "I received an unexpected response. Please try again."
     except Exception as e:
         logger.error("Unexpected error in get_ai_response: %s", e)
         return f"Error: {str(e)}"
@@ -1440,7 +1462,7 @@ if st.session_state.current_page == "movies":
             st.error("Could not load similarity data.")
     
     with tab4:
-        st.subheader("🤖 AI Movie Assistant (Powered by Hugging Face)")
+        st.subheader("🤖 AI Movie Assistant (Powered by Gemini)")
         for message in st.session_state.chat_messages:
             with st.chat_message(message["role"]):
                 st.write(message["content"])
