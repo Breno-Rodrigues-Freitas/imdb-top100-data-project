@@ -920,15 +920,26 @@ def fetch_trailer(title):
 def get_movie_context():
     try:
         query = """
-        SELECT title, rating, year 
-        FROM movies 
-        WHERE rating IS NOT NULL 
-        ORDER BY rating DESC 
-        LIMIT 20
+        SELECT
+            m.title,
+            m.year,
+            m.rating,
+            GROUP_CONCAT(g.name, ', ') as genres
+        FROM movies m
+        LEFT JOIN movie_genres mg ON mg.movie_id = m.id
+        LEFT JOIN genres g ON g.id = mg.genre_id
+        WHERE m.rating IS NOT NULL
+        GROUP BY m.id
+        ORDER BY m.rating DESC
+        LIMIT 30
         """
         df = pd.read_sql(query, conn)
         if not df.empty:
-            return df.to_string(index=False)
+            lines = []
+            for _, row in df.iterrows():
+                genres = row['genres'] if row['genres'] else 'Unknown'
+                lines.append(f"- {row['title']} ({int(row['year']) if row['year'] else '?'}) | Rating: {row['rating']} | Genres: {genres}")
+            return "\n".join(lines)
         return "No movies in database yet."
     except Exception as e:
         logger.error("Error fetching movie context: %s", e)
