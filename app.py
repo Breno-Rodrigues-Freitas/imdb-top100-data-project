@@ -386,6 +386,36 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 # Indexes for performance
 conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username)")
 conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_time ON login_attempts(attempt_time)")
+
+# ── Watchlist ──────────────────────────────────────────────────────────────
+conn.execute("""
+CREATE TABLE IF NOT EXISTS watchlist (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    movie_id   INTEGER NOT NULL,
+    added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id)  REFERENCES users(id),
+    FOREIGN KEY(movie_id) REFERENCES movies(id),
+    UNIQUE(user_id, movie_id)
+)
+""")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+
+# ── User ratings ───────────────────────────────────────────────────────────
+conn.execute("""
+CREATE TABLE IF NOT EXISTS user_ratings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    movie_id   INTEGER NOT NULL,
+    rating     REAL NOT NULL CHECK(rating >= 1 AND rating <= 10),
+    review     TEXT DEFAULT '',
+    rated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id)  REFERENCES users(id),
+    FOREIGN KEY(movie_id) REFERENCES movies(id),
+    UNIQUE(user_id, movie_id)
+)
+""")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_user ON user_ratings(user_id)")
 conn.commit()
 
 # ==============================
@@ -726,16 +756,21 @@ with st.sidebar:
     
     # Navigation
     st.markdown("### Navigation")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("🎬 Movies", use_container_width=True, type="primary" if st.session_state.current_page == "movies" else "secondary"):
             st.session_state.current_page = "movies"
             st.rerun()
     with col2:
+        if st.button("🔖 Watchlist", use_container_width=True, type="primary" if st.session_state.current_page == "watchlist" else "secondary"):
+            st.session_state.current_page = "watchlist"
+            st.rerun()
+    col3, col4 = st.columns(2)
+    with col3:
         if st.button("🕐 History", use_container_width=True, type="primary" if st.session_state.current_page == "history" else "secondary"):
             st.session_state.current_page = "history"
             st.rerun()
-    with col3:
+    with col4:
         if st.button("👤 Profile", use_container_width=True, type="primary" if st.session_state.current_page == "profile" else "secondary"):
             st.session_state.current_page = "profile"
             st.rerun()
@@ -784,7 +819,6 @@ def save_to_history(user_id: int, movie_title: str):
             "INSERT INTO history (user_id, movie_title) VALUES (?, ?)",
             (user_id, movie_title)
         )
-        # Remove os registros mais antigos que ultrapassem o limite
         conn.execute("""
             DELETE FROM history
             WHERE user_id = ?
@@ -798,6 +832,77 @@ def save_to_history(user_id: int, movie_title: str):
         conn.commit()
     except Exception as e:
         logger.error("Error saving search history for user %s: %s", user_id, e)
+
+
+# ==============================
+# WATCHLIST HELPERS
+# ==============================
+def get_movie_id(title: str) -> int | None:
+    """Retorna o id do filme pelo título exato."""
+    try:
+        row = conn.execute("SELECT id FROM movies WHERE title = ?", (title,)).fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error("Error fetching movie id for '%s': %s", title, e)
+        return None
+
+def is_in_watchlist(user_id: int, movie_id: int) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM watchlist WHERE user_id = ? AND movie_id = ?",
+            (user_id, movie_id)
+        ).fetchone()
+        return row is not None
+    except Exception as e:
+        logger.error("Error checking watchlist: %s", e)
+        return False
+
+def toggle_watchlist(user_id: int, movie_id: int) -> str:
+    """Adiciona ou remove da watchlist. Retorna 'added' ou 'removed'."""
+    try:
+        if is_in_watchlist(user_id, movie_id):
+            conn.execute(
+                "DELETE FROM watchlist WHERE user_id = ? AND movie_id = ?",
+                (user_id, movie_id)
+            )
+            conn.commit()
+            return "removed"
+        else:
+            conn.execute(
+                "INSERT INTO watchlist (user_id, movie_id) VALUES (?, ?)",
+                (user_id, movie_id)
+            )
+            conn.commit()
+            return "added"
+    except Exception as e:
+        logger.error("Error toggling watchlist: %s", e)
+        return "error"
+
+def get_user_rating(user_id: int, movie_id: int) -> tuple | None:
+    try:
+        return conn.execute(
+            "SELECT rating, review FROM user_ratings WHERE user_id = ? AND movie_id = ?",
+            (user_id, movie_id)
+        ).fetchone()
+    except Exception as e:
+        logger.error("Error fetching user rating: %s", e)
+        return None
+
+def save_user_rating(user_id: int, movie_id: int, rating: float, review: str = ""):
+    try:
+        conn.execute("""
+            INSERT INTO user_ratings (user_id, movie_id, rating, review)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, movie_id) DO UPDATE SET
+                rating = excluded.rating,
+                review = excluded.review,
+                rated_at = CURRENT_TIMESTAMP
+        """, (user_id, movie_id, rating, review))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error("Error saving user rating: %s", e)
+        return False
 
 
 # ==============================
@@ -1323,6 +1428,134 @@ def history_page():
 
 
 # ==============================
+# WATCHLIST PAGE
+# ==============================
+def watchlist_page():
+    st.subheader("🔖 My Watchlist")
+
+    try:
+        wl_df = pd.read_sql("""
+            SELECT
+                m.id,
+                m.title,
+                m.year,
+                m.rating AS imdb_rating,
+                GROUP_CONCAT(g.name, ', ') AS genres,
+                w.added_at,
+                ur.rating  AS my_rating,
+                ur.review  AS my_review
+            FROM watchlist w
+            JOIN movies m ON m.id = w.movie_id
+            LEFT JOIN movie_genres mg ON mg.movie_id = m.id
+            LEFT JOIN genres g ON g.id = mg.genre_id
+            LEFT JOIN user_ratings ur ON ur.movie_id = m.id AND ur.user_id = w.user_id
+            WHERE w.user_id = ?
+            GROUP BY m.id
+            ORDER BY w.added_at DESC
+        """, conn, params=(st.session_state.user_id,))
+    except Exception as e:
+        logger.error("Error fetching watchlist: %s", e)
+        st.error("Could not load watchlist.")
+        return
+
+    # Métricas
+    total     = len(wl_df)
+    rated     = wl_df["my_rating"].notna().sum() if not wl_df.empty else 0
+    avg_my    = round(wl_df["my_rating"].mean(), 1) if rated > 0 else "—"
+
+    m1, m2, m3 = st.columns(3)
+    with m1: st.metric("🎬 Movies", total)
+    with m2: st.metric("⭐ Rated", f"{rated}/{total}")
+    with m3: st.metric("📊 Avg My Rating", avg_my)
+
+    st.markdown("---")
+
+    if wl_df.empty:
+        st.markdown("""
+        <div style="text-align:center; padding:3rem; color:#6b6b80;
+                    border:1px dashed #ffffff12; border-radius:12px; margin-top:1rem;">
+            <div style="font-size:3rem; margin-bottom:0.5rem;">🔖</div>
+            <div style="font-family:'Bebas Neue',sans-serif; font-size:1.4rem; letter-spacing:2px;">
+                Your watchlist is empty
+            </div>
+            <div style="font-size:0.85rem; margin-top:0.25rem;">
+                Click ➕ next to any movie to add it here
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    for _, row in wl_df.iterrows():
+        movie_id = int(row["id"])
+        col_info, col_rate, col_remove = st.columns([7, 1, 1])
+
+        with col_info:
+            my_badge = f" · 🎯 **{row['my_rating']}/10**" if pd.notna(row["my_rating"]) else ""
+            review_text = f"<div style='color:#9b9bb0; font-size:0.78rem; font-style:italic; margin-top:2px;'>💬 {row['my_review']}</div>" if row.get("my_review") else ""
+            st.markdown(f"""
+            <div style="background:#1a1a24; border:1px solid #ffffff12;
+                        border-radius:10px; padding:12px 16px; margin-bottom:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <span style="font-weight:600; color:#e8e8f0; font-size:0.95rem;">{row['title']}</span>
+                        <span style="color:#6b6b80; font-size:0.8rem; margin-left:8px;">{int(row['year']) if row['year'] else '?'}</span>
+                    </div>
+                    <div style="color:#e8b84b; font-size:0.85rem; font-weight:600;">IMDB {row['imdb_rating']}</div>
+                </div>
+                <div style="color:#6b6b80; font-size:0.78rem; margin-top:4px;">
+                    🎭 {row['genres'] or '—'}{my_badge}
+                </div>
+                {review_text}
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_rate:
+            rate_label = "✏️" if pd.notna(row["my_rating"]) else "⭐"
+            if st.button(rate_label, key=f"wl_rate_{movie_id}", help="Rate this movie", use_container_width=True):
+                st.session_state[f"show_wl_rate_{movie_id}"] = not st.session_state.get(f"show_wl_rate_{movie_id}", False)
+                st.rerun()
+
+        with col_remove:
+            if st.button("🗑️", key=f"wl_remove_{movie_id}", help="Remove from Watchlist", use_container_width=True):
+                try:
+                    conn.execute("DELETE FROM watchlist WHERE user_id = ? AND movie_id = ?",
+                                 (st.session_state.user_id, movie_id))
+                    conn.commit()
+                    st.toast("Removed from Watchlist")
+                    st.rerun()
+                except Exception as e:
+                    logger.error("Error removing from watchlist: %s", e)
+
+        # Painel de rating inline
+        if st.session_state.get(f"show_wl_rate_{movie_id}", False):
+            existing = get_user_rating(st.session_state.user_id, movie_id)
+            with st.container():
+                st.markdown("<div style='background:#1a1a24; border:1px solid #e8b84b33; border-radius:10px; padding:16px; margin-bottom:8px;'>", unsafe_allow_html=True)
+                rc1, rc2 = st.columns([2, 3])
+                with rc1:
+                    new_rating = st.slider("Your rating", 1.0, 10.0,
+                                           value=float(existing[0]) if existing else 7.0,
+                                           step=0.5, key=f"wl_slider_{movie_id}")
+                with rc2:
+                    new_review = st.text_input("Review (optional)",
+                                               value=existing[1] if existing else "",
+                                               placeholder="What did you think?",
+                                               key=f"wl_review_{movie_id}")
+                rb1, rb2 = st.columns([1, 1])
+                with rb1:
+                    if st.button("💾 Save", key=f"wl_save_{movie_id}", use_container_width=True, type="primary"):
+                        if save_user_rating(st.session_state.user_id, movie_id, new_rating, new_review):
+                            st.toast(f"Rating saved: {new_rating}/10 ⭐")
+                            st.session_state[f"show_wl_rate_{movie_id}"] = False
+                            st.rerun()
+                with rb2:
+                    if st.button("✕ Cancel", key=f"wl_cancel_{movie_id}", use_container_width=True):
+                        st.session_state[f"show_wl_rate_{movie_id}"] = False
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================
 # PAGE ROUTING
 # ==============================
 if st.session_state.current_page == "movies":
@@ -1419,7 +1652,84 @@ if st.session_state.current_page == "movies":
             if search_title and st.session_state.get("last_search") != search_title:
                 save_to_history(st.session_state.user_id, search_title)
                 st.session_state.last_search = search_title
-            st.dataframe(df, use_container_width=True)
+
+            # Renderiza filmes como cards com ações
+            for _, row in df.iterrows():
+                movie_id = get_movie_id(row["title"])
+                in_wl    = is_in_watchlist(st.session_state.user_id, movie_id) if movie_id else False
+                ur       = get_user_rating(st.session_state.user_id, movie_id) if movie_id else None
+                user_rating_val = ur[0] if ur else None
+
+                with st.container():
+                    col_info, col_wl, col_rate = st.columns([7, 1, 1])
+
+                    with col_info:
+                        genres_str = row.get("genres", "") or "—"
+                        rating_stars = "⭐" * int(float(row["rating"]) // 2) if row["rating"] else ""
+                        my_badge = f" · 🎯 **Your rating: {user_rating_val}/10**" if user_rating_val else ""
+                        st.markdown(f"""
+                        <div style="
+                            background: #1a1a24;
+                            border: 1px solid #ffffff12;
+                            border-radius: 10px;
+                            padding: 12px 16px;
+                            margin-bottom: 4px;
+                        ">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <div>
+                                    <span style="font-weight:600; color:#e8e8f0; font-size:0.95rem;">{row['title']}</span>
+                                    <span style="color:#6b6b80; font-size:0.8rem; margin-left:8px;">{int(row['year']) if row['year'] else '?'}</span>
+                                </div>
+                                <div style="color:#e8b84b; font-size:0.85rem; font-weight:600;">{row['rating']} {rating_stars}</div>
+                            </div>
+                            <div style="color:#6b6b80; font-size:0.78rem; margin-top:4px;">🎭 {genres_str}{my_badge}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    with col_wl:
+                        wl_label = "🔖" if in_wl else "➕"
+                        wl_help  = "Remove from Watchlist" if in_wl else "Add to Watchlist"
+                        if movie_id and st.button(wl_label, key=f"wl_{movie_id}", help=wl_help, use_container_width=True):
+                            result = toggle_watchlist(st.session_state.user_id, movie_id)
+                            st.toast("Added to Watchlist! 🔖" if result == "added" else "Removed from Watchlist")
+                            st.rerun()
+
+                    with col_rate:
+                        rate_label = f"✏️" if user_rating_val else "⭐"
+                        if movie_id and st.button(rate_label, key=f"rate_btn_{movie_id}", help="Rate this movie", use_container_width=True):
+                            st.session_state[f"show_rate_{movie_id}"] = not st.session_state.get(f"show_rate_{movie_id}", False)
+                            st.rerun()
+
+                # Painel de rating expansível
+                if movie_id and st.session_state.get(f"show_rate_{movie_id}", False):
+                    with st.container():
+                        st.markdown("<div style='background:#1a1a24; border:1px solid #e8b84b33; border-radius:10px; padding:16px; margin-bottom:8px;'>", unsafe_allow_html=True)
+                        rc1, rc2 = st.columns([2, 3])
+                        with rc1:
+                            new_rating = st.slider(
+                                "Your rating", 1.0, 10.0,
+                                value=float(user_rating_val) if user_rating_val else 7.0,
+                                step=0.5, key=f"slider_{movie_id}"
+                            )
+                        with rc2:
+                            new_review = st.text_input(
+                                "Review (optional)",
+                                value=ur[1] if ur else "",
+                                placeholder="What did you think?",
+                                key=f"review_{movie_id}"
+                            )
+                        rb1, rb2 = st.columns([1, 1])
+                        with rb1:
+                            if st.button("💾 Save", key=f"save_rate_{movie_id}", use_container_width=True, type="primary"):
+                                if save_user_rating(st.session_state.user_id, movie_id, new_rating, new_review):
+                                    st.toast(f"Rating saved: {new_rating}/10 ⭐")
+                                    st.session_state[f"show_rate_{movie_id}"] = False
+                                    st.rerun()
+                        with rb2:
+                            if st.button("✕ Cancel", key=f"cancel_rate_{movie_id}", use_container_width=True):
+                                st.session_state[f"show_rate_{movie_id}"] = False
+                                st.rerun()
+                        st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("No movies found with current filters")
     
@@ -1490,5 +1800,7 @@ if st.session_state.current_page == "movies":
 else:
     if st.session_state.current_page == "history":
         history_page()
+    elif st.session_state.current_page == "watchlist":
+        watchlist_page()
     else:
         profile_page()
