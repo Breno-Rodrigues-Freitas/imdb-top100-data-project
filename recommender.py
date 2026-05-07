@@ -64,3 +64,6 @@ print("\n🎬 Recomendações ML:\n")
 
 for idx in indices[0][1:]:
     print(f"- {df.iloc[idx]['primaryTitle']} ({int(df.iloc[idx]['startYear'])})")
+
+
+#nova função 
