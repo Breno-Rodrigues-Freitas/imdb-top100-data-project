@@ -15,7 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ==============================
-# LOGGING CONFIG
+# LOGGING CONFIG configuration
 # ==============================
 logging.basicConfig(
     level=logging.WARNING,
