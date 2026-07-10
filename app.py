@@ -986,7 +986,9 @@ def fetch_movie_from_api(title):
 
 
 # ==============================
+
 # YOUTUBE TRAILER FUNCTION
+
 # ==============================
 def fetch_trailer(title):
     if not YOUTUBE_API_KEY:
